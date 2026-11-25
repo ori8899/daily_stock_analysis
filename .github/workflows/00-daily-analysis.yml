@@ -602,7 +602,7 @@ jobs:
               if any(marker in r.get("content", "") for r in saved):
                   print("跳过已同步报告:", path.name)
                   continue
-              match = re.search(r"(20\\d{2})[-_]?(\\d{2})[-_]?(\\d{2})", path.name)
+              match = re.search(r"(20\d{2})[-_]?(\d{2})[-_]?(\d{2})", path.name)
               date = "-".join(match.groups()) if match else datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8))).date().isoformat()
               datetime.date.fromisoformat(date)
               content = "来源：ori8899/daily_stock_analysis\n" + marker + "\n记录日期来自文件名；无日期文件使用生成日期，不代表行情日期。\n\n" + text

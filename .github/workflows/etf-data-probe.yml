@@ -18,7 +18,7 @@ jobs:
           python-version: '3.11'
       - name: 测试FtShare权限（不输出密钥）
         env:
-          FTSHARE_API_KEY: ${{ secrets.FTSHARE_API_KEY }}
+          FTSHARE_API_KEY: ${{ secrets.FTSHARE_API_KEY || secrets.FTSHAREAPIKEY }}
         shell: python
         run: |
           import os,json,urllib.request,urllib.error,datetime,pathlib,sys

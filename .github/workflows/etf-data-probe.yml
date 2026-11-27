@@ -1,4 +1,4 @@
-name: ETF数据连接测试
+name: 免费ETF与板块数据采集
 on:
   workflow_dispatch:
   push:
@@ -9,7 +9,7 @@ permissions:
 jobs:
   probe:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 12
     env:
       TZ: Asia/Shanghai
     steps:
@@ -21,48 +21,83 @@ jobs:
           FTSHARE_API_KEY: ${{ secrets.FTSHARE_API_KEY || secrets.FTSHAREAPIKEY }}
         shell: python
         run: |
-          import os,json,urllib.request,urllib.parse,urllib.error,datetime,pathlib,time,sys
+          import os,json,urllib.request,urllib.parse,urllib.error,datetime,pathlib,time,math
           key=os.environ.get("FTSHARE_API_KEY","").strip()
           if not key:raise RuntimeError("FtShare Secret未配置")
-          tz=datetime.timezone(datetime.timedelta(hours=8))
-          now=datetime.datetime.now(tz)
-          args={"symbol":"510300.SH","interval_unit":"Day","adjust_kind":"none","since_ts_millis":int((now-datetime.timedelta(days=100)).timestamp()*1000),"until_ts_millis":int(now.timestamp()*1000),"limit":80}
-          url="https://market.ft.tech/gateway/api/v1/market/data/etf-candlesticks?"+urllib.parse.urlencode(args)
-          for attempt in range(3):
-              try:
-                  req=urllib.request.Request(url,headers={"FTSHARE_API_KEY":key,"Accept":"application/json"})
-                  with urllib.request.urlopen(req,timeout=40) as response:payload=json.load(response)
-                  break
-              except urllib.error.HTTPError as e:
-                  print("FtShare HTTP",e.code)
+          tz=datetime.timezone(datetime.timedelta(hours=8));now=datetime.datetime.now(tz);today=now.strftime("%Y%m%d")
+          base="https://market.ft.tech/gateway/api/v1/market/data/"
+          def get(path,args):
+              for attempt in range(3):
                   try:
-                      err=json.loads(e.read(8000));print("诊断:",str(err.get("message",err.get("msg",""))).replace(key,"[REDACTED]")[:600])
-                  except (ValueError,AttributeError):pass
-                  if e.code in (400,401,403) or attempt==2:raise RuntimeError("FtShare请求失败；HTTP "+str(e.code)) from None
-              except (urllib.error.URLError,TimeoutError):
-                  if attempt==2:raise RuntimeError("FtShare网络连接失败") from None
-              time.sleep(2*(attempt+1))
-          if payload.get("code")!=200 or not isinstance(payload.get("data"),list):raise RuntimeError("FtShare返回业务错误或非预期数据结构")
-          safe=[]
-          for row in payload["data"]:
-              if not isinstance(row,dict):raise RuntimeError("日线记录格式错误")
-              ts=row.get("ts_millis")
-              if not isinstance(ts,(int,float)):raise RuntimeError("日线缺失时间戳")
-              item={k:row[k] for k in ["ts_millis","open","high","low","close","volume","turnover"] if k in row}
-              item["date"]=datetime.datetime.fromtimestamp(ts/1000,tz).date().isoformat()
-              for k in ["open","high","low","close"]:
-                  if float(item[k])<=0:raise RuntimeError("无效价格")
-              safe.append(item)
-          safe.sort(key=lambda x:x["ts_millis"])
-          if not safe:raise RuntimeError("接口成功但无日线记录")
-          result={"source":"FtShare免费版单只ETFK线","symbol":"510300.SH","capturedAt":now.isoformat(),"latestMarketDate":safe[-1]["date"],"count":len(safe),"rows":safe}
-          pathlib.Path("etf-probe.json").write_text(json.dumps(result,ensure_ascii=False,indent=2))
-          print(json.dumps({k:v for k,v in result.items() if k!="rows"},ensure_ascii=False))
-          print("最近5根日线:",json.dumps(safe[-5:],ensure_ascii=False))
-          if safe[-1]["date"]!=now.date().isoformat():print("注意：最新行情日期不同于北京时间当天，不当作今日行情。")
+                      req=urllib.request.Request(base+path+"?"+urllib.parse.urlencode(args),headers={"FTSHARE_API_KEY":key,"Accept":"application/json"})
+                      with urllib.request.urlopen(req,timeout=35) as r:d=json.load(r)
+                      if d.get("code")!=200:raise RuntimeError("源端业务错误")
+                      return d["data"]
+                  except urllib.error.HTTPError as e:
+                      if e.code in (400,401,403) or attempt==2:raise RuntimeError("HTTP "+str(e.code)) from None
+                  except (urllib.error.URLError,TimeoutError):
+                      if attempt==2:raise RuntimeError("网络连接失败") from None
+                  time.sleep(2*(attempt+1))
+          def number(x):
+              if x is None or x=="":return None
+              v=float(x)
+              if not math.isfinite(v):raise RuntimeError("数值无效")
+              return v
+          out={"capturedAt":now.isoformat(),"requestedDate":now.date().isoformat(),"etfs":[],"flows":{},"errors":[]}
+          for symbol,name in [("510300.SH","沪深300ETF"),("510050.SH","上证50ETF"),("510500.SH","中证500ETF"),("512100.SH","中证1000ETF"),("159915.SZ","创业板ETF")]:
+              try:
+                  a={"symbol":symbol,"interval_unit":"Day","adjust_kind":"none","since_ts_millis":int((now-datetime.timedelta(days=120)).timestamp()*1000),"until_ts_millis":int(now.timestamp()*1000),"limit":90}
+                  rows=get("etf-candlesticks",a)
+                  if not isinstance(rows,list) or not rows:raise RuntimeError("日线为空")
+                  clean=[]
+                  for r in rows:
+                      ts=r["ts_millis"];d=datetime.datetime.fromtimestamp(ts/1000,tz).date().isoformat()
+                      if d>now.date().isoformat():raise RuntimeError("未来日期")
+                      item={"date":d,**{k:number(r.get(k)) for k in ["open","high","low","close","volume","turnover"]}}
+                      if any(item[k] is None or item[k]<=0 for k in ["open","high","low","close"]):raise RuntimeError("价格缺失")
+                      clean.append(item)
+                  clean.sort(key=lambda x:x["date"])
+                  if len({r["date"] for r in clean})!=len(clean):raise RuntimeError("日线日期重复")
+                  out["etfs"].append({"symbol":symbol,"name":name,"source":"FtShare免费单只ETF日线","rows":clean,"latestDate":clean[-1]["date"]})
+                  print("ETF",symbol,len(clean),clean[-1]["date"],flush=True)
+              except Exception as e:out["errors"].append({"dataset":symbol,"error":str(e).replace(key,"[REDACTED]")})
+              time.sleep(1)
+          specs=[("etf","eastmoney-etf-flow",{}),("industry","eastmoney-sector-flow",{"board_type":"industry","board_level":2}),("concept","eastmoney-sector-flow",{"board_type":"concept"})]
+          for label,path,args in specs:
+              try:
+                  rows=[];complete=True;actual=None
+                  for offset in range(5):
+                      date=(now-datetime.timedelta(days=offset)).strftime("%Y%m%d")
+                      first=get(path,{**args,"trade_date":date,"page":1,"page_size":500})
+                      if not isinstance(first,dict) or not isinstance(first.get("records"),list):raise RuntimeError("分页格式异常")
+                      if not first["records"]:continue
+                      pages=int(first.get("pages",1));rows=list(first["records"]);actual=date
+                      for page in range(2,min(pages,6)+1):
+                          data=get(path,{**args,"trade_date":date,"page":page,"page_size":500})
+                          rows.extend(data["records"]);time.sleep(1)
+                      complete=pages<=6 and len(rows)==int(first.get("total",len(rows)))
+                      break
+                  if not rows:raise RuntimeError("近5个自然日没有可用记录")
+                  safe=[]
+                  for r in rows:
+                      d=str(r.get("trade_date","")).replace("-","")
+                      if d!=actual:raise RuntimeError("源端日期不一致")
+                      if label=="etf":
+                          safe.append({"code":r.get("code"),"name":r.get("code"),"date":d,"main":number(r.get("main_net")),"mainPct":number(r.get("main_pct")),"change":number(r.get("change_pct")),"close":number(r.get("close"))})
+                      else:
+                          if r.get("board_type")!=label:raise RuntimeError("板块类型不符")
+                          if label=="industry" and int(r.get("board_level",0))!=2:raise RuntimeError("行业层级不符")
+                          safe.append({"code":r.get("board_code"),"name":r.get("board_name"),"date":d,"main":None if number(r.get("main_net")) is None else number(r["main_net"])*1e8,"mainPct":number(r.get("main_pct"))})
+                  if len({r["code"] for r in safe})!=len(safe):raise RuntimeError("重复代码")
+                  out["flows"][label]={"date":actual[:4]+"-"+actual[4:6]+"-"+actual[6:],"rows":safe,"complete":complete,"source":"东方财富，经FtShare免费接口","metric":"主力净流入估算","unit":"元","coverage":"源端ETF列表" if label=="etf" else "东方财富二级行业" if label=="industry" else "东方财富概念"}
+                  print("FLOW",label,actual,len(safe),"complete",complete,flush=True)
+              except Exception as e:out["errors"].append({"dataset":label,"error":str(e).replace(key,"[REDACTED]")});print("PENDING",label,flush=True)
+              time.sleep(1)
+          pathlib.Path("free-market.json").write_text(json.dumps(out,ensure_ascii=False,indent=2))
+          print("ERRORS",json.dumps(out["errors"],ensure_ascii=False))
       - uses: actions/upload-artifact@v6
         with:
           name: etf-probe-${{ github.run_id }}
-          path: etf-probe.json
+          path: free-market.json
           if-no-files-found: error
           retention-days: 7

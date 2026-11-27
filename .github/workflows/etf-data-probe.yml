@@ -60,7 +60,7 @@ jobs:
           r=rpc("initialize",{"protocolVersion":protocol,"capabilities":{},"clientInfo":{"name":"observer-etf-probe","version":"1.0"}})
           protocol=r.get("protocolVersion",protocol)
           rpc("notifications/initialized",notification=True)
-          result=rpc("tools/call",{"name":"ft_v2_etf_candlesticks_batch","arguments":{"symbols":["510300.SH"],"interval_unit":"Day","adjust_kind":"none","limit":5}})
+          result=rpc("tools/call",{"name":"ft_v2_etf_candlesticks_batch","arguments":{"symbols":["510300.SH"],"interval_unit":"Day","adjust_kind":"none","since_ts_millis":int((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=7)).timestamp()*1000),"until_ts_millis":int(datetime.datetime.now(datetime.timezone.utc).timestamp()*1000),"limit":5}})
           if result.get("isError"):
               for entry in result.get("content",[]):
                   if entry.get("type")=="text":

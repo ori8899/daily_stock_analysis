@@ -1,0 +1,86 @@
+name: ETF数据连接测试
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/etf-data-probe.yml']
+permissions:
+  contents: read
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TZ: Asia/Shanghai
+    steps:
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+      - name: 测试FtShare权限（不输出密钥）
+        env:
+          FTSHARE_API_KEY: ${{ secrets.FTSHARE_API_KEY }}
+        shell: python
+        run: |
+          import os,json,urllib.request,urllib.error,datetime,pathlib,sys
+          key=os.environ.get("FTSHARE_API_KEY","").strip()
+          if not key:
+              print("FTSHARE_API_KEY 未配置到 Repository secrets");sys.exit(1)
+          url="https://market.ft.tech/gateway/mcp"
+          session=None
+          protocol="2024-11-05"
+          counter=0
+          def rpc(method,params=None,notification=False):
+              global counter,session
+              counter+=1
+              body={"jsonrpc":"2.0","method":method}
+              if params is not None:body["params"]=params
+              if not notification:body["id"]=counter
+              headers={"Content-Type":"application/json","Accept":"application/json, text/event-stream","FTSHARE_API_KEY":key}
+              if session:headers["Mcp-Session-Id"]=session
+              if method!="initialize":headers["MCP-Protocol-Version"]=protocol
+              req=urllib.request.Request(url,data=json.dumps(body).encode(),headers=headers)
+              try:
+                  with urllib.request.urlopen(req,timeout=40) as r:
+                      if method=="initialize":session=r.headers.get("mcp-session-id")
+                      raw=r.read(2000000).decode()
+              except urllib.error.HTTPError as e:
+                  raise RuntimeError("FtShare HTTP "+str(e.code)) from None
+              if notification:return {}
+              try:v=json.loads(raw)
+              except ValueError:
+                  v=None
+                  for line in raw.splitlines():
+                      if line.startswith("data:"):
+                          try:
+                              item=json.loads(line[5:])
+                              if item.get("id")==counter:v=item
+                          except ValueError:pass
+              if not v or v.get("error"):raise RuntimeError("MCP返回错误；未输出源端响应以保护密钥")
+              return v.get("result",{})
+          r=rpc("initialize",{"protocolVersion":protocol,"capabilities":{},"clientInfo":{"name":"observer-etf-probe","version":"1.0"}})
+          protocol=r.get("protocolVersion",protocol)
+          rpc("notifications/initialized",notification=True)
+          result=rpc("tools/call",{"name":"ft_v2_etf_candlesticks_batch","arguments":{"symbols":["510300.SH"],"interval_unit":"Day","adjust_kind":"none","limit":5}})
+          if result.get("isError"):raise RuntimeError("ETF日线接口未成功；请检查账号权限或额度")
+          data=result.get("structuredContent")
+          if not data:
+              for c in result.get("content",[]):
+                  if c.get("type")=="text":
+                      try:data=json.loads(c["text"]);break
+                      except ValueError:pass
+          if not isinstance(data,dict) or data.get("error") or not isinstance(data.get("data"),list):raise RuntimeError("ETF响应不是预期数据表")
+          rows=data["data"]
+          safe=[]
+          for row in rows:
+              if isinstance(row,dict):safe.append({k:row[k] for k in ["symbol","ts_millis","open","high","low","close","volume","turnover"] if k in row})
+          if not safe:raise RuntimeError("接口返回空数据，尚不能确认连接可用")
+          now=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
+          summary={"source":"FtShare","capturedAt":now.isoformat(),"symbol":"510300.SH","rows":safe,"note":"仅日线连接测试，未接入分钟、份额、净值；时间戳为行情日期依据"}
+          pathlib.Path("etf-probe.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2))
+          print(json.dumps(summary,ensure_ascii=False))
+      - uses: actions/upload-artifact@v6
+        with:
+          name: etf-probe-${{ github.run_id }}
+          path: etf-probe.json
+          if-no-files-found: error
+          retention-days: 7

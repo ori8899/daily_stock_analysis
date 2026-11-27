@@ -21,68 +21,42 @@ jobs:
           FTSHARE_API_KEY: ${{ secrets.FTSHARE_API_KEY || secrets.FTSHAREAPIKEY }}
         shell: python
         run: |
-          import os,json,urllib.request,urllib.error,datetime,pathlib,sys
+          import os,json,urllib.request,urllib.parse,urllib.error,datetime,pathlib,time,sys
           key=os.environ.get("FTSHARE_API_KEY","").strip()
-          if not key:
-              print("FTSHARE_API_KEY 未配置到 Repository secrets");sys.exit(1)
-          url="https://market.ft.tech/gateway/mcp"
-          session=None
-          protocol="2024-11-05"
-          counter=0
-          def rpc(method,params=None,notification=False):
-              global counter,session
-              counter+=1
-              body={"jsonrpc":"2.0","method":method}
-              if params is not None:body["params"]=params
-              if not notification:body["id"]=counter
-              headers={"Content-Type":"application/json","Accept":"application/json, text/event-stream","FTSHARE_API_KEY":key}
-              if session:headers["Mcp-Session-Id"]=session
-              if method!="initialize":headers["MCP-Protocol-Version"]=protocol
-              req=urllib.request.Request(url,data=json.dumps(body).encode(),headers=headers)
+          if not key:raise RuntimeError("FtShare Secret未配置")
+          tz=datetime.timezone(datetime.timedelta(hours=8))
+          now=datetime.datetime.now(tz)
+          args={"symbol":"510300.SH","interval_unit":"Day","adjust_kind":"None","since_ts_millis":int((now-datetime.timedelta(days=100)).timestamp()*1000),"until_ts_millis":int(now.timestamp()*1000),"limit":80}
+          url="https://market.ft.tech/gateway/api/v1/market/data/etf-candlesticks?"+urllib.parse.urlencode(args)
+          for attempt in range(3):
               try:
-                  with urllib.request.urlopen(req,timeout=40) as r:
-                      if method=="initialize":session=r.headers.get("mcp-session-id")
-                      raw=r.read(2000000).decode()
+                  req=urllib.request.Request(url,headers={"FTSHARE_API_KEY":key,"Accept":"application/json"})
+                  with urllib.request.urlopen(req,timeout=40) as response:payload=json.load(response)
+                  break
               except urllib.error.HTTPError as e:
-                  raise RuntimeError("FtShare HTTP "+str(e.code)) from None
-              if notification:return {}
-              try:v=json.loads(raw)
-              except ValueError:
-                  v=None
-                  for line in raw.splitlines():
-                      if line.startswith("data:"):
-                          try:
-                              item=json.loads(line[5:])
-                              if item.get("id")==counter:v=item
-                          except ValueError:pass
-              if not v or v.get("error"):raise RuntimeError("MCP返回错误；未输出源端响应以保护密钥")
-              return v.get("result",{})
-          r=rpc("initialize",{"protocolVersion":protocol,"capabilities":{},"clientInfo":{"name":"observer-etf-probe","version":"1.0"}})
-          protocol=r.get("protocolVersion",protocol)
-          rpc("notifications/initialized",notification=True)
-          result=rpc("tools/call",{"name":"ft_v2_etf_candlesticks_batch","arguments":{"symbols":["510300.SH"],"interval_unit":"Day","adjust_kind":"none","since_ts_millis":int((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(days=7)).timestamp()*1000),"until_ts_millis":int(datetime.datetime.now(datetime.timezone.utc).timestamp()*1000),"limit":5}})
-          if result.get("isError"):
-              for entry in result.get("content",[]):
-                  if entry.get("type")=="text":
-                      message=str(entry.get("text","")).replace(key,"[REDACTED]")
-                      print("FtShare接口诊断:",message[:600])
-              raise RuntimeError("ETF日线调用失败，见脱敏诊断")
-          data=result.get("structuredContent")
-          if not data:
-              for c in result.get("content",[]):
-                  if c.get("type")=="text":
-                      try:data=json.loads(c["text"]);break
-                      except ValueError:pass
-          if not isinstance(data,dict) or data.get("error") or not isinstance(data.get("data"),list):raise RuntimeError("ETF响应不是预期数据表")
-          rows=data["data"]
+                  print("FtShare HTTP",e.code)
+                  if e.code in (401,403) or attempt==2:raise RuntimeError("FtShare请求失败；HTTP "+str(e.code)) from None
+              except (urllib.error.URLError,TimeoutError):
+                  if attempt==2:raise RuntimeError("FtShare网络连接失败") from None
+              time.sleep(2*(attempt+1))
+          if payload.get("code")!=200 or not isinstance(payload.get("data"),list):raise RuntimeError("FtShare返回业务错误或非预期数据结构")
           safe=[]
-          for row in rows:
-              if isinstance(row,dict):safe.append({k:row[k] for k in ["symbol","ts_millis","open","high","low","close","volume","turnover"] if k in row})
-          if not safe:raise RuntimeError("接口返回空数据，尚不能确认连接可用")
-          now=datetime.datetime.now(datetime.timezone(datetime.timedelta(hours=8)))
-          summary={"source":"FtShare","capturedAt":now.isoformat(),"symbol":"510300.SH","rows":safe,"note":"仅日线连接测试，未接入分钟、份额、净值；时间戳为行情日期依据"}
-          pathlib.Path("etf-probe.json").write_text(json.dumps(summary,ensure_ascii=False,indent=2))
-          print(json.dumps(summary,ensure_ascii=False))
+          for row in payload["data"]:
+              if not isinstance(row,dict):raise RuntimeError("日线记录格式错误")
+              ts=row.get("ts_millis")
+              if not isinstance(ts,(int,float)):raise RuntimeError("日线缺失时间戳")
+              item={k:row[k] for k in ["ts_millis","open","high","low","close","volume","turnover"] if k in row}
+              item["date"]=datetime.datetime.fromtimestamp(ts/1000,tz).date().isoformat()
+              for k in ["open","high","low","close"]:
+                  if float(item[k])<=0:raise RuntimeError("无效价格")
+              safe.append(item)
+          safe.sort(key=lambda x:x["ts_millis"])
+          if not safe:raise RuntimeError("接口成功但无日线记录")
+          result={"source":"FtShare免费版单只ETFK线","symbol":"510300.SH","capturedAt":now.isoformat(),"latestMarketDate":safe[-1]["date"],"count":len(safe),"rows":safe}
+          pathlib.Path("etf-probe.json").write_text(json.dumps(result,ensure_ascii=False,indent=2))
+          print(json.dumps({k:v for k,v in result.items() if k!="rows"},ensure_ascii=False))
+          print("最近5根日线:",json.dumps(safe[-5:],ensure_ascii=False))
+          if safe[-1]["date"]!=now.date().isoformat():print("注意：最新行情日期不同于北京时间当天，不当作今日行情。")
       - uses: actions/upload-artifact@v6
         with:
           name: etf-probe-${{ github.run_id }}

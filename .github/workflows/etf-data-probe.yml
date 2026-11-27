@@ -35,7 +35,10 @@ jobs:
                   break
               except urllib.error.HTTPError as e:
                   print("FtShare HTTP",e.code)
-                  if e.code in (401,403) or attempt==2:raise RuntimeError("FtShare请求失败；HTTP "+str(e.code)) from None
+                  try:
+                      err=json.loads(e.read(8000));print("诊断:",str(err.get("message",err.get("msg",""))).replace(key,"[REDACTED]")[:600])
+                  except (ValueError,AttributeError):pass
+                  if e.code in (400,401,403) or attempt==2:raise RuntimeError("FtShare请求失败；HTTP "+str(e.code)) from None
               except (urllib.error.URLError,TimeoutError):
                   if attempt==2:raise RuntimeError("FtShare网络连接失败") from None
               time.sleep(2*(attempt+1))

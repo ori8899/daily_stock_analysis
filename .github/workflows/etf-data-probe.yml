@@ -61,7 +61,12 @@ jobs:
           protocol=r.get("protocolVersion",protocol)
           rpc("notifications/initialized",notification=True)
           result=rpc("tools/call",{"name":"ft_v2_etf_candlesticks_batch","arguments":{"symbols":["510300.SH"],"interval_unit":"Day","adjust_kind":"none","limit":5}})
-          if result.get("isError"):raise RuntimeError("ETF日线接口未成功；请检查账号权限或额度")
+          if result.get("isError"):
+              for entry in result.get("content",[]):
+                  if entry.get("type")=="text":
+                      message=str(entry.get("text","")).replace(key,"[REDACTED]")
+                      print("FtShare接口诊断:",message[:600])
+              raise RuntimeError("ETF日线调用失败，见脱敏诊断")
           data=result.get("structuredContent")
           if not data:
               for c in result.get("content",[]):

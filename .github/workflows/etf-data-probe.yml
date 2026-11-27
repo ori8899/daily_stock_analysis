@@ -26,7 +26,7 @@ jobs:
           if not key:raise RuntimeError("FtShare Secret未配置")
           tz=datetime.timezone(datetime.timedelta(hours=8))
           now=datetime.datetime.now(tz)
-          args={"symbol":"510300.SH","interval_unit":"Day","adjust_kind":"None","since_ts_millis":int((now-datetime.timedelta(days=100)).timestamp()*1000),"until_ts_millis":int(now.timestamp()*1000),"limit":80}
+          args={"symbol":"510300.SH","interval_unit":"Day","adjust_kind":"none","since_ts_millis":int((now-datetime.timedelta(days=100)).timestamp()*1000),"until_ts_millis":int(now.timestamp()*1000),"limit":80}
           url="https://market.ft.tech/gateway/api/v1/market/data/etf-candlesticks?"+urllib.parse.urlencode(args)
           for attempt in range(3):
               try:
